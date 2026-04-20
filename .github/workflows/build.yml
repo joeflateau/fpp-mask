@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  compile-check:
+    name: Compile-check against FPP ${{ matrix.fpp-version }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        fpp-version: ["8.5", "master"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache FPP source (${{ matrix.fpp-version }})
+        id: fpp-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/fpp
+          key: fpp-src-${{ matrix.fpp-version }}-v3
+
+      - name: Clone FPP ${{ matrix.fpp-version }}
+        if: steps.fpp-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf /tmp/fpp
+          git clone --depth=1 --branch ${{ matrix.fpp-version }} \
+            https://github.com/FalconChristmas/fpp.git /tmp/fpp
+
+      - name: Install FPP build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache pkg-config \
+            libjsoncpp-dev libcurl4-openssl-dev libssl-dev zlib1g-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            libswresample-dev libmosquitto-dev libfftw3-dev libusb-1.0-0-dev \
+            liblo-dev libzstd-dev libtag1-dev libhttpserver-dev \
+            libsdl2-dev libsdl2-mixer-dev
+
+      - name: Compile-check plugin source
+        run: |
+          # Compile-only — we don't have libfpp.so to link against, but the
+          # bugs we keep hitting are all compile-time signature mismatches.
+          make src/FPPMask.o SRCDIR=/tmp/fpp/src
