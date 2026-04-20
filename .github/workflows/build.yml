@@ -8,42 +8,30 @@ on:
 
 jobs:
   compile-check:
-    name: Compile-check against FPP ${{ matrix.fpp-version }}
+    name: Compile-check on FPP ${{ matrix.fpp-tag }}
     runs-on: ubuntu-22.04
+    container:
+      image: falconchristmas/fpp:${{ matrix.fpp-tag }}
+      options: --user root
     strategy:
       fail-fast: false
       matrix:
-        fpp-version: ["8.5", "master"]
+        fpp-tag: ["v8.5", "master"]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache FPP source (${{ matrix.fpp-version }})
-        id: fpp-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/fpp
-          key: fpp-src-${{ matrix.fpp-version }}-v3
-
-      - name: Clone FPP ${{ matrix.fpp-version }}
-        if: steps.fpp-cache.outputs.cache-hit != 'true'
+      - name: Ensure build tools
         run: |
-          rm -rf /tmp/fpp
-          git clone --depth=1 --branch ${{ matrix.fpp-version }} \
-            https://github.com/FalconChristmas/fpp.git /tmp/fpp
-
-      - name: Install FPP build dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ccache pkg-config \
-            libjsoncpp-dev libcurl4-openssl-dev libssl-dev zlib1g-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-            libswresample-dev libmosquitto-dev libfftw3-dev libusb-1.0-0-dev \
-            liblo-dev libzstd-dev libtag1-dev libhttpserver-dev \
-            libsdl2-dev libsdl2-mixer-dev
+          if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+            apt-get update -qq
+            apt-get install -y --no-install-recommends build-essential ccache
+          fi
 
       - name: Compile-check plugin source
         run: |
-          # Compile-only — we don't have libfpp.so to link against, but the
-          # bugs we keep hitting are all compile-time signature mismatches.
-          make src/FPPMask.o SRCDIR=/tmp/fpp/src
+          # The FPP image has FPP source at /opt/fpp/src and all deps already
+          # installed. Compile-only against those headers — we don't have
+          # libfpp.so available to link against in a runtime image, but every
+          # error we've hit so far has been compile-time.
+          test -d /opt/fpp/src || { echo "::error::No /opt/fpp/src in FPP image"; ls /opt/fpp; exit 1; }
+          make src/FPPMask.o
