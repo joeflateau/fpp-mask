@@ -1,8 +1,3 @@
-#include <drogon/HttpAppFramework.h>
-#undef LOG_WARN
-#undef LOG_INFO
-#undef LOG_DEBUG
-
 #include <fpp-pch.h>
 
 #include <atomic>
@@ -31,19 +26,15 @@ struct MaskData {
 };
 
 class FPPMaskPlugin : public FPPPlugins::Plugin,
-                      public FPPPlugins::ChannelDataPlugin,
-                      public FPPPlugins::APIProviderPlugin {
+                      public FPPPlugins::ChannelDataPlugin {
 public:
     FPPMaskPlugin()
       : FPPPlugins::Plugin("fpp-mask", true),
-        FPPPlugins::ChannelDataPlugin(),
-        FPPPlugins::APIProviderPlugin() {
-        configPath = FPP_DIR_CONFIG("/plugin.fpp-mask.json");
-        loadConfig();
+        FPPPlugins::ChannelDataPlugin() {
+        kvPath = FPP_DIR_CONFIG("/plugin.fpp-mask");
         startMs = GetTimeMS();
-        if (!currentMaskFile.empty()) {
-            loadMask(currentMaskFile);
-        }
+        applySettings();
+        registerEvents();
     }
 
     void modifyChannelData(int /*ms*/, uint8_t* seqData) override {
@@ -66,43 +57,25 @@ public:
         }
     }
 
-    void registerApis() override {
-        auto handler = [this](const drogon::HttpRequestPtr& req,
-                              std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-            handleRequest(req, std::move(cb));
-        };
-        drogon::app().registerHandler("/Mask", handler, {drogon::Get, drogon::Post});
-        drogon::app().registerHandlerViaRegex("/Mask/.*", handler, {drogon::Get, drogon::Post});
-
-        Events::AddCallback("/Mask/Set", [this](const std::string&, const std::string& payload) {
-            setEnabled(parseBool(payload));
-        });
-        Events::AddCallback("/Mask/Toggle", [this](const std::string&, const std::string&) {
-            setEnabled(!enabled.load());
-        });
-        Events::AddCallback("/Mask/Load", [this](const std::string&, const std::string& payload) {
-            if (loadMask(payload)) saveConfig();
-        });
-    }
-
-    void unregisterApis() override {}
-
     void multiSyncData(const uint8_t* data, int len) override {
         if (len <= 0) return;
         std::string s(reinterpret_cast<const char*>(data), len);
         if (!s.empty() && s.back() == '\0') s.pop_back();
         if (s == "on") setEnabled(true, false);
         else if (s == "off") setEnabled(false, false);
-        else if (s.rfind("load:", 0) == 0) {
-            if (loadMask(s.substr(5))) saveConfig();
-        }
+        else if (s.rfind("load:", 0) == 0) loadAndPersistMask(s.substr(5));
     }
 
-    void settingChanged(const std::string& key, const std::string& /*value*/) override {
+    void settingChanged(const std::string& key, const std::string& value) override {
         if (key == "MaskFile") {
-            auto it = settings.find("MaskFile");
-            if (it != settings.end() && !it->second.empty() && it->second != currentMaskFile) {
-                if (loadMask(it->second)) saveConfig();
+            if (!value.empty() && value != currentMaskFile) {
+                loadMask(value);
+            }
+        } else if (key == "Enabled") {
+            bool v = parseBool(value);
+            if (v != enabled.load()) {
+                enabled.store(v);
+                LogInfo(VB_PLUGIN, "fpp-mask: %s (via settings)\n", v ? "enabled" : "disabled");
             }
         }
         std::lock_guard<std::mutex> g(rangesMutex);
@@ -111,32 +84,53 @@ public:
 
 private:
     static bool parseBool(const std::string& s) {
-        return s == "1" || s == "on" || s == "true" || s == "ON" || s == "True";
+        return s == "1" || s == "on" || s == "true" || s == "True" || s == "ON";
+    }
+
+    void registerEvents() {
+        Events::AddCallback("/Mask/Set", [this](const std::string&, const std::string& payload) {
+            setEnabled(parseBool(payload));
+        });
+        Events::AddCallback("/Mask/Toggle", [this](const std::string&, const std::string&) {
+            setEnabled(!enabled.load());
+        });
+        Events::AddCallback("/Mask/Load", [this](const std::string&, const std::string& payload) {
+            loadAndPersistMask(payload);
+        });
+    }
+
+    void applySettings() {
+        auto it = settings.find("Enabled");
+        if (it != settings.end()) enabled.store(parseBool(it->second));
+        it = settings.find("MaskFile");
+        if (it != settings.end() && !it->second.empty()) loadMask(it->second);
     }
 
     void ensureRanges() {
         std::lock_guard<std::mutex> g(rangesMutex);
         if (!ranges.empty()) return;
-        for (auto& r : GetOutputRanges()) {
-            ranges.emplace_back(r.first, r.second);
-        }
+        for (auto& r : GetOutputRanges()) ranges.emplace_back(r.first, r.second);
     }
 
     void setEnabled(bool v, bool propagate = true) {
-        bool was = enabled.exchange(v);
-        if (was == v) return;
+        if (enabled.exchange(v) == v) return;
+        writeSetting("Enabled", v ? "true" : "false");
         if (propagate && multiSync) {
             std::string msg = v ? "on" : "off";
             multiSync->SendPluginData(name, reinterpret_cast<uint8_t*>(msg.data()), msg.size());
         }
-        saveConfig();
         LogInfo(VB_PLUGIN, "fpp-mask: %s\n", v ? "enabled" : "disabled");
+    }
+
+    void loadAndPersistMask(const std::string& filename) {
+        if (!loadMask(filename)) return;
+        writeSetting("MaskFile", filename);
     }
 
     bool loadMask(const std::string& filename) {
         std::string fullPath = filename;
         if (!filename.empty() && filename.front() != '/') {
-            fullPath = FPP_DIR_SEQUENCE("/" + filename);
+            fullPath = "/home/fpp/media/sequences/" + filename;
         }
         std::unique_ptr<FSEQFile> f{FSEQFile::openFSEQFile(fullPath)};
         if (!f) {
@@ -169,65 +163,24 @@ private:
         return true;
     }
 
-    void handleRequest(const drogon::HttpRequestPtr& req,
-                       std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-        std::string path = req->getPath();
-        std::string action;
-        if (path.size() > 5) action = path.substr(6);
-
-        Json::Value resp;
-        if (action == "on" || action == "enable") {
-            setEnabled(true);
-        } else if (action == "off" || action == "disable") {
-            setEnabled(false);
-        } else if (action == "toggle") {
-            setEnabled(!enabled.load());
-        } else if (action.rfind("load/", 0) == 0) {
-            std::string fn = action.substr(5);
-            resp["loaded"] = loadMask(fn);
-            if (resp["loaded"].asBool()) saveConfig();
+    void writeSetting(const std::string& key, const std::string& value) {
+        std::lock_guard<std::mutex> g(writeMutex);
+        settings[key] = value;
+        std::ofstream f(kvPath, std::ios::trunc);
+        if (!f) return;
+        for (auto& [k, v] : settings) {
+            f << k << "=" << v << "\n";
         }
-
-        auto m = currentMask.load();
-        resp["enabled"] = enabled.load();
-        resp["maskFile"] = currentMaskFile;
-        if (m) {
-            resp["frames"] = m->numFrames;
-            resp["channels"] = m->channelCount;
-            resp["stepMs"] = m->stepMs;
-        }
-
-        Json::StreamWriterBuilder w;
-        auto r = drogon::HttpResponse::newHttpResponse();
-        r->setBody(Json::writeString(w, resp));
-        r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-        cb(r);
     }
 
-    void loadConfig() {
-        if (!FileExists(configPath)) return;
-        Json::Value root;
-        if (!LoadJsonFromFile(configPath, root)) return;
-        if (root.isMember("enabled")) enabled.store(root["enabled"].asBool());
-        if (root.isMember("maskFile")) currentMaskFile = root["maskFile"].asString();
-    }
-
-    void saveConfig() {
-        Json::Value root;
-        root["enabled"] = enabled.load();
-        root["maskFile"] = currentMaskFile;
-        Json::StreamWriterBuilder w;
-        std::ofstream f(configPath);
-        if (f) f << Json::writeString(w, root);
-    }
-
-    std::string configPath;
+    std::string kvPath;
     std::string currentMaskFile;
     std::atomic<bool> enabled{false};
     std::atomic<std::shared_ptr<MaskData>> currentMask;
     uint64_t startMs = 0;
     std::vector<std::pair<uint32_t, uint32_t>> ranges;
     std::mutex rangesMutex;
+    std::mutex writeMutex;
 };
 
 extern "C" {

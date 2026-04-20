@@ -1,9 +1,38 @@
 <?php
-require_once "/opt/fpp/www/common.php";
-require_once "/opt/fpp/www/config.php";
+$kvFile = "/home/fpp/media/config/plugin.fpp-mask";
+$sequenceDir = "/home/fpp/media/sequences";
 
-$pluginName = "fpp-mask";
-$sequenceDir = $settings['sequenceDirectory'] ?? '/home/fpp/media/sequences';
+function readSettings($file) {
+    $s = [];
+    if (file_exists($file)) {
+        foreach (file($file) as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#') continue;
+            $eq = strpos($line, '=');
+            if ($eq === false) continue;
+            $s[substr($line, 0, $eq)] = substr($line, $eq + 1);
+        }
+    }
+    return $s;
+}
+
+function writeSettings($file, $settings) {
+    $out = '';
+    foreach ($settings as $k => $v) $out .= "$k=$v\n";
+    file_put_contents($file, $out);
+}
+
+$saved = false;
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $current = readSettings($kvFile);
+    $current['Enabled']  = isset($_POST['Enabled']) ? 'true' : 'false';
+    $current['MaskFile'] = $_POST['MaskFile'] ?? '';
+    writeSettings($kvFile, $current);
+    $saved = true;
+}
+
+$current = readSettings($kvFile);
+
 $sequences = [];
 if (is_dir($sequenceDir)) {
     foreach (scandir($sequenceDir) as $f) {
@@ -12,81 +41,56 @@ if (is_dir($sequenceDir)) {
     sort($sequences);
 }
 ?>
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Mask Plugin</title>
-    <link rel="stylesheet" href="/css/fpp.css">
-    <style>
-        body { font-family: sans-serif; padding: 1em; }
-        .row { margin-bottom: 1em; }
-        button { padding: 0.5em 1em; margin-right: 0.5em; }
-        #status { background: #222; color: #0f0; padding: 0.5em; font-family: monospace; white-space: pre; }
-        select { padding: 0.4em; min-width: 300px; }
-    </style>
-</head>
-<body>
-    <h1>Brightness Mask</h1>
+<style>
+    .mask-page { padding: 1em; max-width: 700px; }
+    .mask-page .row { margin-bottom: 1em; }
+    .mask-page select { padding: 0.4em; min-width: 320px; }
+    .mask-page button { padding: 0.5em 1em; }
+    .mask-page .saved { color: #2a7; font-weight: bold; }
+    .mask-page code { background: #eee; padding: 1px 4px; }
+</style>
 
-    <div class="row">
-        <strong>State:</strong>
-        <button onclick="apiCall('on')">Enable</button>
-        <button onclick="apiCall('off')">Disable</button>
-        <button onclick="apiCall('toggle')">Toggle</button>
-    </div>
+<div class="mask-page">
+    <h2>Brightness Mask</h2>
 
-    <div class="row">
-        <strong>Mask sequence:</strong><br>
-        <select id="maskFile">
-            <?php foreach ($sequences as $s): ?>
-                <option value="<?= htmlspecialchars($s) ?>"><?= htmlspecialchars($s) ?></option>
-            <?php endforeach; ?>
-        </select>
-        <button onclick="loadMask()">Load</button>
-    </div>
+    <?php if ($saved): ?>
+        <p class="saved">Saved. Plugin will pick up changes within a second.</p>
+    <?php endif; ?>
 
-    <div class="row">
-        <strong>Status:</strong>
-        <button onclick="refresh()">Refresh</button>
-        <pre id="status">Loading...</pre>
-    </div>
+    <form method="POST">
+        <div class="row">
+            <label>
+                <input type="checkbox" name="Enabled" value="true"
+                    <?= ($current['Enabled'] ?? '') === 'true' ? 'checked' : '' ?>>
+                <strong>Mask enabled</strong>
+            </label>
+        </div>
 
-    <h2>REST API</h2>
+        <div class="row">
+            <label><strong>Mask sequence file:</strong><br>
+                <select name="MaskFile">
+                    <option value="">(none &mdash; passthrough)</option>
+                    <?php foreach ($sequences as $s): ?>
+                        <option value="<?= htmlspecialchars($s) ?>"
+                            <?= ($current['MaskFile'] ?? '') === $s ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($s) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+        </div>
+
+        <button type="submit">Save</button>
+    </form>
+
+    <h3>MQTT (Home Assistant)</h3>
+    <p>Topics relative to your FPP MQTT prefix (Settings &rarr; MQTT):</p>
     <ul>
-        <li><code>GET /api/plugin-apis/Mask</code> — status</li>
-        <li><code>GET /api/plugin-apis/Mask/on</code> — enable</li>
-        <li><code>GET /api/plugin-apis/Mask/off</code> — disable</li>
-        <li><code>GET /api/plugin-apis/Mask/toggle</code></li>
-        <li><code>GET /api/plugin-apis/Mask/load/&lt;filename.fseq&gt;</code></li>
-    </ul>
-
-    <h2>MQTT topics (relative to your FPP MQTT prefix)</h2>
-    <ul>
-        <li><code>event/Mask/Set</code> — payload <code>on</code> or <code>off</code></li>
+        <li><code>event/Mask/Set</code> &mdash; payload <code>on</code> or <code>off</code></li>
         <li><code>event/Mask/Toggle</code></li>
-        <li><code>event/Mask/Load</code> — payload = filename.fseq</li>
+        <li><code>event/Mask/Load</code> &mdash; payload = filename.fseq</li>
     </ul>
 
-    <script>
-    async function apiCall(action) {
-        const r = await fetch('/api/plugin-apis/Mask/' + action);
-        document.getElementById('status').textContent = await r.text();
-    }
-    async function refresh() {
-        const r = await fetch('/api/plugin-apis/Mask');
-        const j = await r.json();
-        document.getElementById('status').textContent = JSON.stringify(j, null, 2);
-        if (j.maskFile) {
-            const sel = document.getElementById('maskFile');
-            for (const opt of sel.options) if (opt.value === j.maskFile) sel.value = j.maskFile;
-        }
-    }
-    async function loadMask() {
-        const fn = document.getElementById('maskFile').value;
-        const r = await fetch('/api/plugin-apis/Mask/load/' + encodeURIComponent(fn));
-        document.getElementById('status').textContent = await r.text();
-    }
-    refresh();
-    </script>
-</body>
-</html>
+    <h3>Current settings file</h3>
+    <pre><?= htmlspecialchars(file_exists($kvFile) ? file_get_contents($kvFile) : '(empty)') ?></pre>
+</div>

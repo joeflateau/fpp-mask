@@ -49,19 +49,8 @@ sudo systemctl restart fppd
 
 Visit **Status Pages → Mask Plugin** in the FPP UI to pick the mask sequence
 file and toggle the mask on/off. State persists across restarts in
-`/home/fpp/media/config/plugin.fpp-mask.json`.
-
-## REST API
-
-All endpoints return JSON status. Reachable as `http://<fpp>/api/plugin-apis/Mask/...`.
-
-| Endpoint            | Action                               |
-| ------------------- | ------------------------------------ |
-| `GET /Mask`         | current state                        |
-| `GET /Mask/on`      | enable                               |
-| `GET /Mask/off`     | disable                              |
-| `GET /Mask/toggle`  | toggle                               |
-| `GET /Mask/load/<filename.fseq>` | load a different mask file |
+`/home/fpp/media/config/plugin.fpp-mask` (a `key=value` file). The plugin
+watches that file and applies changes within ~1 second of save.
 
 ## MQTT (Home Assistant)
 
